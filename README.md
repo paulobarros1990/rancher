@@ -1,4 +1,4 @@
-# RKE2 + Rancher + NGINX Ingress + cert-manager (CA Interna)
+# RKE2 (HA) + Rancher + NGINX Ingress + cert-manager (CA Interna)
 
 Este repositório documenta **todo o passo a passo**, baseado em um cenário real, para criação de um cluster Kubernetes com **RKE2**, **MetalLB**, **NGINX Ingress Controller**, **Rancher** e **cert-manager** utilizando **CA interna**, incluindo erros encontrados e como foram corrigidos.
 
