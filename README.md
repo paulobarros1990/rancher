@@ -1,14 +1,27 @@
-# 🚀 RKE2 + Rancher (HA) – Guia Completo de Instalação (Lab Produção-Like)
+# RKE2 + Rancher (HA) – Guia Completo de Instalação (Passo a Passo)
 
-Este repositório documenta **passo a passo** a criação de um ambiente **Kubernetes RKE2 em Alta Disponibilidade**, com **Ingress NGINX**, **MetalLB**, **Rancher** e **TLS via cert-manager com CA interna**.
+Este documento descreve **do zero** a criação de um ambiente **Kubernetes RKE2 em Alta Disponibilidade**, com **MetalLB**, **Ingress NGINX**, **Rancher** e **TLS usando cert-manager com CA interna**.
 
-O guia foi validado em laboratório local e inclui **problemas reais encontrados**, suas **causas raiz** e as **correções aplicadas**, servindo como **runbook confiável** para recriação do ambiente do zero.
+O conteúdo foi construído a partir de uma instalação real em laboratório, incluindo **erros encontrados**, **causas raiz** e **correções aplicadas**, garantindo um **runbook confiável e reproduzível**.
 
 ---
 
-## 📐 Arquitetura do Ambiente
+## Visão Geral do Ambiente
 
-### Control Plane (HA – etcd + control-plane)
+- Kubernetes: **RKE2 (stable)**
+- Topologia: **3 Masters + 3 Workers**
+- LoadBalancer: **MetalLB (Layer 2)**
+- Ingress Controller: **ingress-nginx (RKE2)**
+- Gerenciamento: **Rancher**
+- TLS: **cert-manager + CA interna**
+- Sistema Operacional: **Rocky Linux / RHEL-like**
+- Ambiente: **Lab on‑prem / virtualizado**
+
+---
+
+## Endereçamento de Exemplo
+
+### Masters
 | Hostname | IP |
 |--------|----|
 | rke2-master-01 | 192.168.122.110 |
@@ -22,131 +35,230 @@ O guia foi validado em laboratório local e inclui **problemas reais encontrados
 | rke2-worker-02 | 192.168.122.121 |
 | rke2-worker-03 | 192.168.122.122 |
 
-### LoadBalancer (MetalLB)
+### MetalLB
 ```
 192.168.122.200 – 192.168.122.220
 ```
 
 ---
 
-## 🧱 Componentes Utilizados
+# 1️⃣ Provisionamento dos Servidores
 
-- **Kubernetes**: RKE2 (canal `stable`)
-- **Container Runtime**: containerd (nativo RKE2)
-- **Ingress Controller**: ingress-nginx (RKE2)
-- **LoadBalancer**: MetalLB (Layer 2)
-- **Gerenciamento**: Rancher
-- **TLS**: cert-manager + CA interna
-- **SO**: Rocky Linux / RHEL-like
-- **Ambiente**: Lab on-prem / virtualizado
+1. Instalar Rocky Linux / RHEL-like
+2. Configurar IP fixo
+3. Definir hostname persistente
+4. Atualizar o sistema
+
+```bash
+hostnamectl set-hostname rke2-master-01
+dnf update -y
+```
+
+Desabilitar componentes não suportados pelo Kubernetes (LAB):
+
+```bash
+setenforce 0
+sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config
+systemctl disable --now firewalld
+swapoff -a
+sed -i '/ swap / s/^/#/' /etc/fstab
+```
 
 ---
 
-## 📋 Pré-Requisitos
+# 2️⃣ Cópia da Chave SSH (Fedora → Servidores)
 
-- Máquinas com IP fixo configurado
-- Acesso SSH como `root`
-- DNS local ou `/etc/hosts`
-- Swap desabilitado
-- SELinux permissive/disabled (lab)
-- Firewall desabilitado (lab)
+Na máquina de administração (Fedora):
+
+```bash
+ssh-keygen -t ed25519
+ssh-copy-id root@192.168.122.110
+ssh-copy-id root@192.168.122.111
+ssh-copy-id root@192.168.122.112
+ssh-copy-id root@192.168.122.120
+ssh-copy-id root@192.168.122.121
+ssh-copy-id root@192.168.122.122
+```
+
+Objetivo:
+- Permitir automação
+- Evitar autenticação por senha
 
 ---
 
-## 📌 Etapas da Instalação
+# 3️⃣ Instalação dos Pré‑Requisitos
 
-### 1️⃣ Provisionamento dos Servidores
-- Configuração de IP fixo
-- Definição de hostname persistente
-- Ajustes básicos de SO
+Executar em **todos os nós (masters e workers)**:
 
-### 2️⃣ Cópia da Chave SSH
-Permite automação e administração centralizada a partir da máquina Fedora.
+```bash
+modprobe overlay
+modprobe br_netfilter
 
-### 3️⃣ Instalação dos Pré-Requisitos
-- Desabilitar swap
-- Ajustar sysctl do Kubernetes
-- Carregar módulos do kernel
-- Habilitar chrony
+cat <<EOF > /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
 
-### 4️⃣ Instalação do RKE2 (stable)
-- 3 masters (server)
-- 3 workers (agent)
-- Cluster em HA com etcd distribuído
+sysctl --system
+dnf install -y curl vim chrony bash-completion
+systemctl enable --now chronyd
+```
 
-### 5️⃣ MetalLB
-- Implementação de LoadBalancer on-prem
-- Pool de IPs dedicado
+---
 
-### 6️⃣ Ingress NGINX (RKE2)
+# 4️⃣ Instalação do RKE2 (Masters e Workers)
 
-#### ⚠️ Problema encontrado
-Inicialmente apenas o service abaixo estava presente:
+## 4.1 Master 01
+
+```bash
+curl -sfL https://get.rke2.io | INSTALL_RKE2_CHANNEL=stable sh -
+systemctl enable --now rke2-server
+```
+
+Token do cluster:
+
+```bash
+cat /var/lib/rancher/rke2/server/node-token
+```
+
+## 4.2 Masters adicionais
+
+```bash
+curl -sfL https://get.rke2.io | INSTALL_RKE2_CHANNEL=stable sh -
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://rke2-master-01:9345
+token: <TOKEN>
+EOF
+systemctl enable --now rke2-server
+```
+
+## 4.3 Workers
+
+```bash
+curl -sfL https://get.rke2.io | INSTALL_RKE2_CHANNEL=stable INSTALL_RKE2_TYPE=agent sh -
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://rke2-master-01:9345
+token: <TOKEN>
+EOF
+systemctl enable --now rke2-agent
+```
+
+---
+
+# 5️⃣ Instalação do MetalLB
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml
+```
+
+Configuração do pool:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.122.200-192.168.122.220
+```
+
+---
+
+# 6️⃣ Ingress NGINX (RKE2)
+
+## Problema Encontrado
+
+Inicialmente apenas o service abaixo existia:
+
 ```
 rke2-ingress-nginx-controller-admission
 ```
 
-Esse service é **apenas webhook interno** e **não expõe tráfego HTTP/HTTPS**.
+Esse service **não expõe aplicações**.
 
-#### ✅ Correção aplicada
-Foi necessário aplicar uma **HelmChartConfig** do RKE2 para garantir a criação do service principal do controller como `LoadBalancer`:
+## Correção
+
+Criar `HelmChartConfig` do RKE2:
 
 ```yaml
-controller:
-  service:
-    enabled: true
-    type: LoadBalancer
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |
+    controller:
+      service:
+        enabled: true
+        type: LoadBalancer
 ```
 
-Após isso:
-- `rke2-ingress-nginx-controller` passou a expor **80/443**
-- MetalLB atribuiu IP externo corretamente
+Resultado esperado:
+
+```bash
+kubectl -n kube-system get svc rke2-ingress-nginx-controller
+```
 
 ---
 
-### 7️⃣ Instalação do cert-manager
-Responsável pela emissão e gerenciamento de certificados TLS.
+# 7️⃣ Instalação do Rancher
 
-### 8️⃣ CA Interna (Recomendado para LAB)
-- Criação de CA Root interna
-- ClusterIssuer baseado em CA
-- Evita dependência externa (Let's Encrypt)
+```bash
+helm repo add rancher https://releases.rancher.com/server-charts/stable
+helm repo update
 
-### 9️⃣ Instalação do Rancher
-- Deploy via Helm
-- Integrado ao Ingress NGINX
-- Acesso via hostname (`rancher.lab.local`)
+helm install rancher rancher/rancher   --namespace cattle-system   --create-namespace   --set hostname=rancher.lab.local
+```
 
 ---
 
-## 🔐 TLS do Rancher – Problema e Correção
+# 8️⃣ cert-manager + TLS com CA Interna
 
-### ❌ Sintoma
-- Browser apresentava:
-  ```
-  Kubernetes Ingress Controller Fake Certificate
-  ```
-- Certificate ficava em estado `DoesNotExist`
+## 8.1 Instalar cert-manager
 
-### 🔍 Causa Raiz
-- Ingress apontava para um `secretName` inexistente
-- O `Certificate` do cert-manager ainda não havia criado o Secret
-- NGINX faz fallback automático para Fake Certificate
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+```
 
-### ✅ Correção Definitiva
-1. Criar o `Certificate` com CA interna
-2. Garantir que o Secret TLS fosse criado
-3. Apontar o Ingress para o **mesmo `secretName`**
-4. Recarregar o ingress-nginx
+## 8.2 Criar CA interna
 
-Resultado:
-- TLS válido
-- Certificado assinado pela CA interna
-- Rancher funcional sem Fake Certificate
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: rancher-ca-issuer
+spec:
+  ca:
+    secretName: rancher-root-ca-secret
+```
+
+## 8.3 Criar Certificate do Rancher
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rancher-tls
+  namespace: cattle-system
+spec:
+  secretName: tls-rancher-ingress
+  commonName: rancher.lab.local
+  dnsNames:
+    - rancher.lab.local
+  issuerRef:
+    name: rancher-ca-issuer
+    kind: ClusterIssuer
+```
+
+Ingress deve apontar para o mesmo `secretName`.
 
 ---
 
-## ✅ Validação Final
+## Validação Final
 
 ```bash
 kubectl get nodes
@@ -162,51 +274,16 @@ https://rancher.lab.local
 
 ---
 
-## 🧠 Observações Importantes
+## Conclusão
 
-- O taint `CriticalAddonsOnly=true:NoExecute` nos masters é **comportamento esperado**
-- cert-manager **não cria Secret manualmente**
-- `secretName` deve ser **idêntico** no Certificate e no Ingress
-- Ingress NGINX do RKE2 roda como **DaemonSet**
-- O service `*-admission` **não expõe aplicações**
-
----
-
-## 📂 Estrutura Recomendada do Repositório
-
-```
-.
-├── README.md
-├── runbook.sh
-├── docs/
-│   ├── arquitetura.md
-│   ├── ingress-nginx.md
-│   ├── cert-manager.md
-│   ├── troubleshooting.md
-```
-
----
-
-## 🎯 Status do Ambiente
-
-✔ Kubernetes HA funcional  
+✔ Cluster RKE2 HA funcional  
 ✔ Ingress exposto via MetalLB  
-✔ Rancher acessível  
+✔ Rancher operacional  
 ✔ TLS válido com CA interna  
-✔ Ambiente reproduzível  
+✔ Runbook reproduzível  
 
 ---
 
-## 📌 Próximos Passos (opcional)
-
-- Automação total via Ansible
-- Backup do etcd
-- Integração com LDAP/AD
-- Observabilidade (Prometheus + Grafana)
-- Migração futura para domínio público
-
----
-
-**Autor**  
+Autor:  
 Paulo Henrique Barros  
 Linux | DevOps | Kubernetes | Cloud
